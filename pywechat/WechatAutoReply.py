@@ -222,9 +222,6 @@ class WechatAutoReply:
                             friend_message.add_processed_message(reply_content)
                             print(f"已将回复内容添加到 {name} 的已处理队列: {reply_content}")
 
-                    # 短暂休眠，避免过度占用CPU
-                    time.sleep(0.5)
-
                 except Exception as e:
                     print(f"工作线程处理 friends_map 时出错: {e}")
                     time.sleep(1)
