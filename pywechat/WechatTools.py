@@ -104,12 +104,10 @@ class Tools():
         该方法通过检测当前windows系统的进程中\n
         是否有WeChat.exe该项进程来判断微信是否在运行
         '''
-        wmi=win32com.client.GetObject('winmgmts:')
-        processes=wmi.InstancesOf('Win32_Process')
-        for process in processes:
-            if process.Name.lower()=='Wechat.exe'.lower():
-                return True
-        return False
+        try:
+            return any(p.name().lower() == 'wechat.exe' for p in psutil.process_iter(['name']))
+        except:
+            raise Exception('检测wechat.exe进程异常')
     
     @staticmethod
     def language_detector()->(str|None):
@@ -395,7 +393,7 @@ class Tools():
                         if is_maximize:
                             main_window.maximize()
                         NetWorkErrotText=main_window.child_window(**Texts.NetWorkError)
-                        if NetWorkErrotText.exists():
+                        if NetWorkErrotText.exists(timeout=1):
                             main_window.close()
                             raise NetWorkNotConnectError(f'未连接网络,请连接网络后再进行后续自动化操作！')
                         return main_window

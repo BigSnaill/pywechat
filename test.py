@@ -8,4 +8,5 @@ if __name__ == '__main__':
         return '测试'
 
 
-    WechatAutoReply.auto_reply_messages_to_friends(deal_message, '10s', ['Snaill'], is_maximize=False)
+    # AutoReply.auto_reply_messages('测试', '1000s')
+    WechatAutoReply.auto_reply_messages_to_friends(deal_message, '5s', ['Snaill'], is_maximize=False)

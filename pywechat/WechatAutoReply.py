@@ -1,6 +1,7 @@
 import re
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+import threading
 import time
 from typing import Deque, Any, Callable
 import pyautogui
@@ -27,6 +28,7 @@ class Message:
         self._nickname: str = nickname
         self._pending_message_queue: Deque[Any] = deque()
         self._processed_message_queue: Deque[Any] = deque()
+        self._lock = threading.Lock()
 
     # Getter methods
     def get_nickname(self) -> str:
@@ -47,12 +49,38 @@ class Message:
         self._nickname = nickname
 
     def add_pending_message(self, message: Any) -> None:
-        """Add a message to the pending queue"""
-        self._pending_message_queue.append(message)
+        """Add a message to the pending queue (thread-safe)"""
+        with self._lock:
+            self._pending_message_queue.append(message)
+
+    def get_pending_message(self) -> Any:
+        """Get and remove a message from the pending queue (thread-safe)"""
+        with self._lock:
+            if self._pending_message_queue:
+                return self._pending_message_queue.popleft()
+            return None
 
     def add_processed_message(self, message: Any) -> None:
-        """Add a message to the processed queue"""
-        self._processed_message_queue.append(message)
+        """Add a message to the processed queue (thread-safe)"""
+        with self._lock:
+            self._processed_message_queue.append(message)
+
+    def get_processed_message(self) -> Any:
+        """Get and remove a message from the processed queue (thread-safe)"""
+        with self._lock:
+            if self._processed_message_queue:
+                return self._processed_message_queue.popleft()
+            return None
+
+    def has_pending_messages(self) -> bool:
+        """Check if there are pending messages"""
+        with self._lock:
+            return len(self._pending_message_queue) > 0
+
+    def has_processed_messages(self) -> bool:
+        """Check if there are processed messages"""
+        with self._lock:
+            return len(self._processed_message_queue) > 0
 
 
 language = Tools.language_detector()  # 有些功能需要判断语言版本
@@ -94,6 +122,10 @@ class WechatAutoReply:
             close_wechat:任务结束后是否关闭微信,默认关闭
         '''
         friends_map = dict()
+        friends_map_lock = threading.RLock()
+        message_available = threading.Event()  # 用于通知有新消息需要处理
+        shutdown_event = threading.Event()  # 用于优雅关闭线程
+        
         reply_duration = match_duration(reply_duration)
         if not reply_duration:
             raise TimeNotCorrectError
@@ -126,149 +158,315 @@ class WechatAutoReply:
         @performance_monitor("get_messages方法")
         def get_messages(filtered_messages):
             # 获取文本类聊天信息
-            if filtered_messages:
-                for name, num in filtered_messages:
+            if not filtered_messages:
+                return
+            
+            # 批量处理所有需要获取消息的好友，减少窗口切换次数
+            for name, num in filtered_messages:
+                # 线程安全地创建消息对象
+                with friends_map_lock:
                     if not friends_map.get(name):
                         friends_map[name] = Message(name)
+                
+                # 快速切换到好友聊天窗口
+                Tools.find_friend_in_MessageList(friend=name, is_maximize=is_maximize)
+                
+                # 快速检查是否为好友聊天
+                voice_call_button = main_window.child_window(**Buttons.VoiceCallButton)
+                video_call_button = main_window.child_window(**Buttons.VideoCallButton)
+                
+                if not (voice_call_button.exists() and video_call_button.exists()):
+                    continue
+                    
+                # 极速消息获取策略
+                collected_messages = quick_get_messages(name, num)
 
-                    Tools.find_friend_in_MessageList(friend=name, is_maximize=is_maximize)[1]
-                    check_more_messages_button = main_window.child_window(**Buttons.CheckMoreMessagesButton)
-                    voice_call_button = main_window.child_window(**Buttons.VoiceCallButton)  # 语音聊天按钮
-                    video_call_button = main_window.child_window(**Buttons.VideoCallButton)  # 视频聊天按钮
-                    # 只处理好友,不处理群聊和公众号
-                    if voice_call_button.exists() and video_call_button.exists():
-                        friendtype = '好友'
-                        chatList = main_window.child_window(**Main_window.FriendChatList)
-                        x, y = chatList.rectangle().left + 10, (
-                                main_window.rectangle().top + main_window.rectangle().bottom) // 2
-                        ListItems = [message for message in chatList.children(control_type='ListItem') if
-                                     message.descendants(control_type='Button')]
-                        # 点击聊天区域侧边栏靠里一些的位置,依次来激活滑块,不直接main_window.click_input()是为了防止点到消息
-                        mouse.click(coords=(x, y))
-                        # 按一下pagedown到最下边
-                        pyautogui.press('pagedown')
-                        ########################
-                        # 需要先提前向上遍历一遍,防止语音消息没有转换完毕
-                        if num <= 10:  # 10条消息最多先向上遍历number//3页
-                            pages = num // 3
-                        else:
-                            pages = num // 2  # 超过10条
-                        for _ in range(pages):
-                            if check_more_messages_button.exists():
-                                check_more_messages_button.click_input()
-                                mouse.click(coords=(x, y))
-                            pyautogui.press('pageup', _pause=False)
-                        pyautogui.press('End')
-                        mouse.click(coords=(x, y))
-                        pyautogui.press('pagedown')
-                        # 开始记录消息
-                        while len(list(set(ListItems))) < num:
-                            if check_more_messages_button.exists():
-                                check_more_messages_button.click_input()
-                                mouse.click(coords=(x, y))
-                            pyautogui.press('pageup', _pause=False)
-                            ListItems.extend([message for message in chatList.children(control_type='ListItem') if
-                                              message.descendants(control_type='Button')])
-                        pyautogui.press('End')
-                        #######################################################
-                        ListItems = ListItems[-num:]
-                        message_contents = []
-                        for ListItem in ListItems:
-                            message_sender, message_content, message_type = Tools.parse_message_content(ListItem,
-                                                                                                        friendtype)
-                            if message_type == '文本':
-                                message_contents.append(message_content)
+                
+                # 立即添加到待处理队列
+                if collected_messages:
+                    with friends_map_lock:
                         friend_message = friends_map[name]
-                        friend_message.add_pending_message(message_contents)
+                        friend_message.add_pending_message(collected_messages)
+                    # 通知异步处理线程有新消息
+                    message_available.set()
+        
+        def quick_get_messages(friend_name, num):
+            """极速消息获取：最小化在聊天窗口的停留时间"""
+            try:
+                friendtype = '好友'
+                chatList = main_window.child_window(**Main_window.FriendChatList)
+                
+                # 一键跳转到聊天底部
+                pyautogui.press('End')
+                
+                # 根据消息数量快速计算翻页策略
+                if num <= 10:
+                    # 10条以内，直接获取当前页面消息
+                    messages = extract_current_page_messages(chatList, friendtype, num)
+                else:
+                    # 超过10条，快速翻页获取
+                    pages_needed = min((num + 9) // 10, 3)  # 最多翻3页，防止过度停留
+                    pyautogui.press('pageup', presses=pages_needed, interval=0.02, _pause=False)
+                    
+                    # 快速检查"查看更多消息"按钮
+                    check_more_button = main_window.child_window(**Buttons.CheckMoreMessagesButton)
+                    if check_more_button.exists():
+                        check_more_button.click_input()
+                    
+                    # 获取消息
+                    messages = extract_current_page_messages(chatList, friendtype, num)
+                    
+                    # 立即回到底部，减少停留时间
+                    pyautogui.press('End')
+                
+                return messages
+                
+            except Exception as e:
+                print(f"快速获取 {friend_name} 消息时出错: {e}")
+                return []
+        
+        def extract_current_page_messages(chatList, friendtype, max_count):
+            """快速提取当前页面的消息，无循环等待"""
+            messages = []
+            try:
+                # 一次性获取所有消息项
+                list_items = [msg for msg in chatList.children(control_type='ListItem') 
+                             if msg.descendants(control_type='Button')]
+                
+                # 快速解析消息内容，限制处理数量
+                for item in list_items[-max_count*2:]:  # 多取一些以防有非文本消息
+                    if len(messages) >= max_count:
+                        break
+                    try:
+                        message_sender, message_content, message_type = Tools.parse_message_content(item, friendtype)
+                        if message_type == '文本' and message_content.strip():
+                            messages.append(message_content)
+                    except:
+                        continue  # 跳过解析失败的消息
+                
+                # 返回最新的消息
+                return messages[-max_count:] if len(messages) > max_count else messages
+                
+            except Exception as e:
+                print(f"提取消息时出错: {e}")
+                return messages
 
         @performance_monitor("reply方法")
         def reply():
-            for key, value in friends_map.items():
-                processed_message_queue = value.get_processed_message_queue()
-                while processed_message_queue:
-                    message = processed_message_queue.popleft()  # 取出最早的消息
-                    print(f"回复 {key} 的消息: {message}")
-                    Tools.find_friend_in_MessageList(friend=key, is_maximize=is_maximize)
-                    current_chat = main_window.child_window(**Main_window.CurrentChatWindow)
-                    current_chat.click_input()
+            """超快速回复方法：最小化在聊天窗口的停留时间"""
+            reply_tasks = []  # 收集所有需要回复的任务
+            
+            # 快速收集所有需要回复的消息
+            with friends_map_lock:
+                friend_keys = list(friends_map.keys())
+            
+            for key in friend_keys:
+                with friends_map_lock:
+                    if key not in friends_map:
+                        continue
+                    friend_message = friends_map[key]
+                
+                # 快速收集该好友的所有待回复消息
+                messages_to_reply = []
+                while True:
+                    message = friend_message.get_processed_message()
+                    if message is None:
+                        break
+                    messages_to_reply.append(message)
+                
+                # 如果有消息需要回复，添加到任务列表
+                if messages_to_reply:
+                    reply_tasks.append((key, messages_to_reply))
+            
+            # 如果没有回复任务，直接返回
+            if not reply_tasks:
+                return
+            
+            # 超快速执行回复任务
+            for friend_name, messages in reply_tasks:
+                print(f"极速回复 {friend_name} 的 {len(messages)} 条消息")
+                
+                # 极速回复策略
+                quick_reply_to_friend(friend_name, messages)
+            
+            # 回复完成后立即激活滑块
+            if scrollable:
+                mouse.click(coords=(x, y))  # 立即激活滑块，继续遍历会话列表
+        
+        def quick_reply_to_friend(friend_name, messages):
+            """单个好友的极速回复策略"""
+            try:
+                start_time = time.time()
+                
+                # 快速切换到好友聊天窗口
+                Tools.find_friend_in_MessageList(friend=friend_name, is_maximize=is_maximize)
+                
+                # 预先获取输入框引用
+                current_chat = main_window.child_window(**Main_window.CurrentChatWindow)
+                
+                # 批量发送消息，减少每条消息之间的延迟
+                for i, message in enumerate(messages):
+                    # 只在第一条消息时点击输入框
+                    if i == 0:
+                        current_chat.click_input()
+                    
+                    # 超快速发送消息
                     Systemsettings.copy_text_to_windowsclipboard(message)
                     pyautogui.hotkey('ctrl', 'v', _pause=False)
                     pyautogui.hotkey('alt', 's', _pause=False)
-
-            if scrollable:
-                mouse.click(coords=(x, y))  # 回复完成后点击右上方,激活滑块，继续遍历会话列表
+                    
+                    # 只在多条消息时添加最小延迟
+                    if len(messages) > 1 and i < len(messages) - 1:
+                        time.sleep(0.05)  # 最小延迟，确保消息发送完成
+                
+                end_time = time.time()
+                print(f"极速回复 {friend_name} 耗时: {end_time - start_time:.3f}秒")
+                
+            except Exception as e:
+                print(f"极速回复 {friend_name} 时出错: {e}")
 
         def process_friends_map():
-            """单独的工作线程，专门处理 friends_map 中的数据"""
-            while True:
+            """事件驱动的异步消息处理线程"""
+            print("异步消息处理线程已启动")
+            
+            while not shutdown_event.is_set():
                 try:
-                    # 遍历 friends_map 中的所有好友
-                    for name, friend_message in friends_map.items():
-                        # 获取待处理的消息队列
-                        pending_queue = friend_message.get_pending_message_queue()
-
-                        # 处理待处理的消息
-                        while pending_queue:
-                            messages = pending_queue.popleft()
-                            print(f"工作线程处理 {name} 的待处理消息: {messages}")
-
-                            # 调用内容生成函数
-                            if callable(content_func):
-                                reply_content = content_func(messages)
-                            else:
-                                raise Exception('请传入处理消息的函数')
-
-                            # 将处理后的消息添加到已处理队列
-                            friend_message.add_processed_message(reply_content)
-                            print(f"已将回复内容添加到 {name} 的已处理队列: {reply_content}")
-
+                    # 等待新消息通知或超时
+                    if message_available.wait(timeout=1.0):
+                        message_available.clear()  # 清除事件标志
+                        
+                        # 批量处理所有待处理的消息
+                        has_work = False
+                        
+                        # 获取当前所有好友的副本，避免长时间持有锁
+                        with friends_map_lock:
+                            current_friends = dict(friends_map)
+                        
+                        for name, friend_message in current_friends.items():
+                            # 处理该好友的所有待处理消息
+                            while True:
+                                messages = friend_message.get_pending_message()
+                                if messages is None:
+                                    break
+                                
+                                has_work = True
+                                print(f"异步处理 {name} 的待处理消息: {len(messages) if isinstance(messages, list) else 1}条")
+                                
+                                try:
+                                    # 调用内容生成函数
+                                    if callable(content_func):
+                                        reply_content = content_func(messages)
+                                        
+                                        # 将处理后的消息添加到已处理队列
+                                        friend_message.add_processed_message(reply_content)
+                                        print(f"已生成回复内容给 {name}: {reply_content[:50]}...")
+                                    else:
+                                        print("错误：未提供有效的消息处理函数")
+                                        break
+                                        
+                                except Exception as e:
+                                    print(f"处理 {name} 的消息时出错: {e}")
+                                    continue
+                        
+                        if has_work:
+                            print("本轮异步处理完成")
+                
                 except Exception as e:
-                    print(f"工作线程处理 friends_map 时出错: {e}")
-                    time.sleep(1)
+                    print(f"异步处理线程出错: {e}")
+                    time.sleep(0.5)
+            
+            print("异步消息处理线程已停止")
 
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="FriendsMapProcessor")
+        # 启动异步消息处理线程
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="AsyncMessageProcessor")
+        processing_future = None
+        
         try:
-            # 使用线程池
-            executor.submit(process_friends_map)
-            print("工作线程已启动")
-            # 打开文件传输助手是为了防止当前窗口有好友给自己发消息无法检测到,因为当前窗口即使有新消息也不会在会话列表中好友头像上显示数字,
-            main_window = Tools.open_dialog_window(friend=filetransfer, wechat_path=wechat_path, is_maximize=is_maximize)[1]
+            # 启动异步处理线程
+            processing_future = executor.submit(process_friends_map)
+            print("异步消息处理已启动")
+            
+            # 打开微信和初始化UI
+            main_window = Tools.open_wechat(wechat_path=wechat_path, is_maximize=is_maximize)
+            Tools.open_dialog_window(friend=filetransfer, wechat_path=wechat_path, is_maximize=is_maximize)
+            
+            chat_button = main_window.child_window(**SideBar.Chats)
+            chat_button.click_input()
             myname = main_window.child_window(control_type='Button', found_index=0).window_text()
             messageList = main_window.child_window(**Main_window.ConversationList)
             scrollable = Tools.is_VerticalScrollable(messageList)
             x, y = messageList.rectangle().right - 5, messageList.rectangle().top + 8  # 右上方滑块的位置
+            
             if scrollable:
                 mouse.click(coords=(x, y))  # 点击右上方激活滑块
                 pyautogui.press('Home')  # 按下Home健确保从顶部开始
-            search_pages = 1
 
-            chatsButton = main_window.child_window(**SideBar.Chats)
+            # 主循环：快速获取新消息和发送回复
             while True:
-                if chatsButton.legacy_properties().get('Value'):  # 如果左侧的聊天按钮式红色的就遍历,否则原地等待
+                # 检查是否有新消息需要获取
+                if chat_button.legacy_properties().get('Value'):
+                    # 快速遍历会话列表获取新消息
+                    total_start_time = time.time()
+                    
                     if scrollable:
-                        for _ in range(max_pages + 1):
+                        # 快速遍历模式：只获取消息，不立即回复
+                        for page in range(max_pages + 1):
+                            page_start_time = time.time()
+                            
+                            # 快速获取当前页的新消息
                             filtered_messages = record()
                             if filtered_messages:
                                 get_messages(filtered_messages)
-                                pyautogui.press('pagedown', _pause=False)
-                            search_pages += 1
+                            
+                            # 快速翻到下一页
+                            pyautogui.press('pagedown', _pause=False)
+                            
+                            page_end_time = time.time()
+                            print(f"第{page+1}页处理耗时: {page_end_time - page_start_time:.3f}秒")
+                            
+                            # 如果单页处理时间过长，跳过剩余页面
+                            if page_end_time - page_start_time > 2.0:  # 单页超过2秒就跳过
+                                print("单页处理时间过长，跳过剩余页面")
+                                break
+                        
+                        # 快速回到顶部
                         pyautogui.press('Home')
-
                     else:
+                        # 非滚动模式：快速处理
                         filtered_messages = record()
                         if filtered_messages:
                             get_messages(filtered_messages)
+                    
+                    total_end_time = time.time()
+                    print(f"本轮获取消息耗时: {total_end_time - total_start_time:.3f}秒")
+                
+                # 执行回复操作（检查是否有已处理完的消息需要回复）
                 reply()
-
-                Tools.open_dialog_window(friend=filetransfer, wechat_path=wechat_path,
-                                         is_maximize=is_maximize)[1]
+                
+                # 立即回到文件传输助手，释放聊天窗口
+                Tools.open_dialog_window(friend=filetransfer, wechat_path=wechat_path, is_maximize=is_maximize)
+                
+                # 等待一段时间，让异步线程有时间处理消息
                 time.sleep(reply_duration)
+                
         except Exception as e:
-            print('微信自动回复异常:', e)
+            print(f'微信自动回复异常: {e}')
         finally:
-            # 关闭线程池
+            # 优雅关闭异步处理线程
+            print("正在关闭异步处理线程...")
+            shutdown_event.set()  # 设置关闭信号
+            message_available.set()  # 唤醒可能在等待的线程
+            
+            if processing_future:
+                try:
+                    processing_future.result(timeout=3)  # 等待最多3秒
+                except Exception as e:
+                    print(f"关闭异步线程时出错: {e}")
+            
             if executor:
-                executor.shutdown(wait=False)  # 不等待线程完成，直接关闭
+                executor.shutdown(wait=True)  # 等待线程完成
+                
             Systemsettings.close_listening_mode()
+            
             if close_wechat:
                 main_window.close()
