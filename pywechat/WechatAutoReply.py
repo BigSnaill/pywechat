@@ -138,6 +138,28 @@ class WechatAutoReply:
         if language == '繁体中文':
             filetransfer = '檔案傳輸'
 
+        def get_current_chat_friend():
+            """获取当前聊天窗口的好友名称，用于避免重复切换"""
+            try:
+                # 检查当前聊天窗口的标题或其他标识
+                current_window = main_window.child_window(**Main_window.CurrentChatWindow)
+                if current_window.exists():
+                    return current_window.window_text()
+                return None
+            except:
+                return None
+
+        def smart_switch_to_friend(friend_name):
+            """智能切换到好友聊天窗口，避免重复操作"""
+            current_friend = get_current_chat_friend()
+            if current_friend == friend_name:
+                print(f"已在 {friend_name} 的聊天窗口，跳过切换操作")
+                return False  # 未发生切换
+            else:
+                print(f"从 {current_friend} 切换到 {friend_name}")
+                Tools.find_friend_in_MessageList(friend=friend_name, is_maximize=is_maximize)
+                return True  # 发生了切换
+
         @performance_monitor("record方法")
         def record():
             # 遍历当前会话列表内可见的所有成员，获取他们的名称和新消息条数，没有新消息的话返回[]
@@ -168,8 +190,8 @@ class WechatAutoReply:
                     if not friends_map.get(name):
                         friends_map[name] = Message(name)
                 
-                # 快速切换到好友聊天窗口
-                Tools.find_friend_in_MessageList(friend=name, is_maximize=is_maximize)
+                # 智能切换到好友聊天窗口（避免重复切换）
+                smart_switch_to_friend(name)
                 
                 # 快速检查是否为好友聊天
                 voice_call_button = main_window.child_window(**Buttons.VoiceCallButton)
@@ -178,7 +200,7 @@ class WechatAutoReply:
                 if not (voice_call_button.exists() and video_call_button.exists()):
                     continue
                     
-                # 极速消息获取策略
+                # 极速消息获取策略（保持最小停留时间）
                 collected_messages = quick_get_messages(name, num)
 
                 
@@ -234,9 +256,7 @@ class WechatAutoReply:
                              if msg.descendants(control_type='Button')]
                 
                 # 快速解析消息内容，限制处理数量
-                for item in list_items[-max_count*2:]:  # 多取一些以防有非文本消息
-                    if len(messages) >= max_count:
-                        break
+                for item in list_items[-max_count:]:  # 多取一些以防有非文本消息
                     try:
                         message_sender, message_content, message_type = Tools.parse_message_content(item, friendtype)
                         if message_type == '文本' and message_content.strip():
@@ -298,8 +318,8 @@ class WechatAutoReply:
             try:
                 start_time = time.time()
                 
-                # 快速切换到好友聊天窗口
-                Tools.find_friend_in_MessageList(friend=friend_name, is_maximize=is_maximize)
+                # 智能切换到好友聊天窗口（避免重复切换）
+                smart_switch_to_friend(friend_name)
                 
                 # 预先获取输入框引用
                 current_chat = main_window.child_window(**Main_window.CurrentChatWindow)
@@ -324,6 +344,41 @@ class WechatAutoReply:
                 
             except Exception as e:
                 print(f"极速回复 {friend_name} 时出错: {e}")
+
+        def initialize_wechat():
+            """微信初始化方法，封装所有初始化逻辑"""
+            print("正在初始化微信...")
+            
+            try:
+                # 打开微信和初始化UI
+                main_window = Tools.open_wechat(wechat_path=wechat_path, is_maximize=is_maximize)
+                Tools.open_dialog_window(friend=filetransfer, wechat_path=wechat_path, is_maximize=is_maximize)
+                
+                # 初始化UI组件
+                chat_button = main_window.child_window(**SideBar.Chats)
+                chat_button.click_input()
+                myname = main_window.child_window(control_type='Button', found_index=0).window_text()
+                messageList = main_window.child_window(**Main_window.ConversationList)
+                scrollable = Tools.is_VerticalScrollable(messageList)
+                x, y = messageList.rectangle().right - 5, messageList.rectangle().top + 8  # 右上方滑块的位置
+                
+                if scrollable:
+                    mouse.click(coords=(x, y))  # 点击右上方激活滑块
+                    pyautogui.press('Home')  # 按下Home健确保从顶部开始
+                
+                print("微信初始化完成")
+                return main_window, chat_button, messageList, scrollable, x, y, myname
+                
+            except Exception as e:
+                print(f"微信初始化失败: {e}")
+                raise
+
+        def check_and_reconnect_wechat():
+            """检查微信状态并在必要时重连"""
+            if not Tools.is_wechat_running():
+                print("检测到微信进程已退出，尝试重新启动微信...")
+                return initialize_wechat()
+            return None
 
         def process_friends_map():
             """事件驱动的异步消息处理线程"""
@@ -384,73 +439,83 @@ class WechatAutoReply:
         try:
             # 启动异步处理线程
             processing_future = executor.submit(process_friends_map)
-            print("异步消息处理已启动")
-            
-            # 打开微信和初始化UI
-            main_window = Tools.open_wechat(wechat_path=wechat_path, is_maximize=is_maximize)
-            Tools.open_dialog_window(friend=filetransfer, wechat_path=wechat_path, is_maximize=is_maximize)
-            
-            chat_button = main_window.child_window(**SideBar.Chats)
-            chat_button.click_input()
-            myname = main_window.child_window(control_type='Button', found_index=0).window_text()
-            messageList = main_window.child_window(**Main_window.ConversationList)
-            scrollable = Tools.is_VerticalScrollable(messageList)
-            x, y = messageList.rectangle().right - 5, messageList.rectangle().top + 8  # 右上方滑块的位置
-            
-            if scrollable:
-                mouse.click(coords=(x, y))  # 点击右上方激活滑块
-                pyautogui.press('Home')  # 按下Home健确保从顶部开始
+
+            # 初始化微信
+            main_window, chat_button, messageList, scrollable, x, y, myname = initialize_wechat()
 
             # 主循环：快速获取新消息和发送回复
             while True:
-                # 检查是否有新消息需要获取
-                if chat_button.legacy_properties().get('Value'):
-                    # 快速遍历会话列表获取新消息
-                    total_start_time = time.time()
+                try:
+                    # 检查微信状态并在必要时重连
+                    reconnect_result = check_and_reconnect_wechat()
+                    if reconnect_result:
+                        main_window, chat_button, messageList, scrollable, x, y, myname = reconnect_result
+                        print("微信已重新启动并初始化完成")
+                        continue
                     
-                    if scrollable:
-                        # 快速遍历模式：只获取消息，不立即回复
-                        for page in range(max_pages + 1):
-                            page_start_time = time.time()
+                    # 检查是否有新消息需要获取
+                    if chat_button.legacy_properties().get('Value'):
+                        # 快速遍历会话列表获取新消息
+                        total_start_time = time.time()
+                        
+                        if scrollable:
+                            # 快速遍历模式：只获取消息，不立即回复
+                            for page in range(max_pages + 1):
+                                page_start_time = time.time()
+                                
+                                # 快速获取当前页的新消息
+                                filtered_messages = record()
+                                if filtered_messages:
+                                    get_messages(filtered_messages)
+                                
+                                # 快速翻到下一页
+                                pyautogui.press('pagedown', _pause=False)
+                                
+                                page_end_time = time.time()
+                                print(f"第{page+1}页处理耗时: {page_end_time - page_start_time:.3f}秒")
+                                
+                                # 如果单页处理时间过长，跳过剩余页面
+                                if page_end_time - page_start_time > 2.0:  # 单页超过2秒就跳过
+                                    print("单页处理时间过长，跳过剩余页面")
+                                    break
                             
-                            # 快速获取当前页的新消息
+                            # 快速回到顶部
+                            pyautogui.press('Home')
+                        else:
+                            # 非滚动模式：快速处理
                             filtered_messages = record()
                             if filtered_messages:
                                 get_messages(filtered_messages)
-                            
-                            # 快速翻到下一页
-                            pyautogui.press('pagedown', _pause=False)
-                            
-                            page_end_time = time.time()
-                            print(f"第{page+1}页处理耗时: {page_end_time - page_start_time:.3f}秒")
-                            
-                            # 如果单页处理时间过长，跳过剩余页面
-                            if page_end_time - page_start_time > 2.0:  # 单页超过2秒就跳过
-                                print("单页处理时间过长，跳过剩余页面")
-                                break
                         
-                        # 快速回到顶部
-                        pyautogui.press('Home')
-                    else:
-                        # 非滚动模式：快速处理
-                        filtered_messages = record()
-                        if filtered_messages:
-                            get_messages(filtered_messages)
+                        total_end_time = time.time()
+                        print(f"本轮获取消息耗时: {total_end_time - total_start_time:.3f}秒")
                     
-                    total_end_time = time.time()
-                    print(f"本轮获取消息耗时: {total_end_time - total_start_time:.3f}秒")
-                
-                # 执行回复操作（检查是否有已处理完的消息需要回复）
-                reply()
-                
-                # 立即回到文件传输助手，释放聊天窗口
-                Tools.open_dialog_window(friend=filetransfer, wechat_path=wechat_path, is_maximize=is_maximize)
-                
-                # 等待一段时间，让异步线程有时间处理消息
-                time.sleep(reply_duration)
+                    # 执行回复操作（检查是否有已处理完的消息需要回复）
+                    reply()
+                    
+                    # 智能回到文件传输助手，释放聊天窗口（避免重复切换）
+                    smart_switch_to_friend(filetransfer)
+                    
+                    # 等待一段时间，让异步线程有时间处理消息
+                    time.sleep(reply_duration)
+                    
+                except Exception as loop_error:
+                    error_msg = str(loop_error)
+                    print(f"主循环发生异常: {loop_error}")
+                    print(f"异常类型: {type(loop_error)}")
+                    
+                    # 检查是否是微信窗口相关的COM错误
+                    if "事件无法调用任何订户" in error_msg or "COMError" in str(type(loop_error)):
+                        print("检测到微信窗口COM错误，可能微信已经退出，将在下次循环尝试重新启动")
+                    else:
+                        print("发生其他类型异常，继续运行...")
+                    
+                    # 等待一段时间后继续循环
+                    time.sleep(2)
                 
         except Exception as e:
             print(f'微信自动回复异常: {e}')
+            
         finally:
             # 优雅关闭异步处理线程
             print("正在关闭异步处理线程...")
