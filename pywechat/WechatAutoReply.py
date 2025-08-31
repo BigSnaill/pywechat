@@ -111,7 +111,7 @@ class WechatAutoReply:
         该方法用来遍历会话列表查找新消息自动回复,最大回复数量=max_pages*(8~10)\n
         只会回复指定好友和文本类信息
         Args:
-            content_func:自动回复内容函数
+            content_func:自动回复内容函数.入参：{'name': name, 'messages': messages}, 其中name是指定的好友(有备注用备注，没备注用昵称)，messages是获取的消息
             reply_duration:自动回复持续时长,格式:'s','min','h'单位:s/秒,min/分,h/小时. 默认10s
             friends: 指定的好友才会回复(有备注用备注，没备注用昵称)
             max_pages:遍历会话列表页数,一页为8~10人,设定持续时间后,将持续在max_pages内循环遍历查找是否有新消息
@@ -410,7 +410,7 @@ class WechatAutoReply:
                                 try:
                                     # 调用内容生成函数
                                     if callable(content_func):
-                                        reply_content = content_func(messages)
+                                        reply_content = content_func({'name': name, 'messages': messages})
                                         
                                         # 将处理后的消息添加到已处理队列
                                         friend_message.add_processed_message(reply_content)
