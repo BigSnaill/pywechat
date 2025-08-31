@@ -657,8 +657,8 @@ class Tools():
                     return None,main_window
             if scrollable:
                 rectangle=message_list_pane.rectangle()
-                message_list_pane.iface_scroll.SetScrollPercent(verticalPercent=0.0,horizontalPercent=1.0)#调用SetScrollPercent方法向上滚动,verticalPercent=0.0表示直接将scrollbar一下子置于顶部
                 mouse.click(coords=activateScollbarPosition)
+                message_list_pane.iface_scroll.SetScrollPercent(verticalPercent=0.0, horizontalPercent=1.0)#调用SetScrollPercent方法向上滚动,verticalPercent=0.0表示直接将scrollbar一下子置于顶部
                 for _ in range(search_pages):
                     friend_button,index=selecte_in_messageList(friend)
                     if friend_button:

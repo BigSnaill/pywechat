@@ -156,8 +156,8 @@ class WechatAutoReply:
                 print(f"已在 {friend_name} 的聊天窗口，跳过切换操作")
                 return False  # 未发生切换
             else:
-                print(f"从 {current_friend} 切换到 {friend_name}")
                 Tools.find_friend_in_MessageList(friend=friend_name, is_maximize=is_maximize)
+                print(f"从 {current_friend} 切换到 {friend_name}")
                 return True  # 发生了切换
 
         @performance_monitor("record方法")
